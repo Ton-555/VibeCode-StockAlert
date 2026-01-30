@@ -1,0 +1,25 @@
+name: Daily Stock Check
+
+on:
+  schedule:
+    # ตั้งเวลา 8.00 น. ประเทศไทย (UTC+7) = ตี 1 UTC
+    # เลข 0 1 หมายถึง นาทีที่ 0, ชั่วโมงที่ 1 (UTC)
+    - cron: '0 1 * * 1-5' 
+  workflow_dispatch: # ปุ่มกดรันเองสำหรับทดสอบ
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install libraries
+        run: pip install -r requirements.txt
+
+      - name: Run Stock Bot
+        run: python main.py
