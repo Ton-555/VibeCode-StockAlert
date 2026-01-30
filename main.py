@@ -128,3 +128,40 @@ def send_discord_message(results):
     }
 
     print("🚀 กำลังส่ง HTTP Request ไปยัง Discord...")
+    
+    # --- ส่วนที่เติมให้ครบ (Request) ---
+    try:
+        if not DISCORD_WEBHOOK_URL:
+            print("❌ ยกเลิกการส่ง: ไม่พบ URL")
+            return
+
+        response = requests.post(
+            DISCORD_WEBHOOK_URL, 
+            data=json.dumps(payload), 
+            headers={"Content-Type": "application/json"}
+        )
+        if response.status_code == 204:
+            print("✅ ส่งเข้า Discord สำเร็จ!")
+        else:
+            print(f"❌ ส่งไม่ผ่าน: {response.status_code} {response.text}")
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+
+# ==========================================
+# 👇 ส่วนที่สำคัญที่สุด (Main Execution Block)
+# ==========================================
+if __name__ == "__main__":
+    print("⏳ Start Process: กําลังเริ่มวิเคราะห์หุ้น...") 
+    
+    results = []
+    for stock in STOCK_LIST:
+        print(f"   🔎 Checking {stock}...")
+        res = analyze_stock(stock)
+        if res:
+            results.append(res)
+    
+    if results:
+        print(f"📊 ได้ข้อมูลครบ {len(results)} ตัว.. กำลังส่งข้อมูล")
+        send_discord_message(results)
+    else:
+        print("⚠️ ไม่พบข้อมูลหุ้นเลย (ตรวจสอบเน็ต หรือ ชื่อหุ้น)")
