@@ -3,95 +3,133 @@ import pandas as pd
 import requests
 import json
 import os
+from datetime import datetime
+from dotenv import load_dotenv
 
-# --- 1. ตั้งค่า ---
-# ใส่รายชื่อหุ้นที่ต้องการ (Ticker Symbol)แส
-STOCK_LIST = ['AAPL', 'TSLA', 'MSFT', 'NVDA', 'GOOGL']
+# โหลดค่าจากไฟล์ .env
+load_dotenv()
 
-# URL จากขั้นตอนที่ 1 (ถ้าทดสอบในคอมให้ใส่ตรงนี้ แต่ถ้าขึ้น GitHub ให้ใช้วิธี Environment Variable)
-# เพื่อความปลอดภัย เบื้องต้นคุณใส่ URL ตรงนี้เพื่อเทสก่อนได้เลย
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1466711413979353152/N_ci6sZ5hvBP--yJ8a8BHKWNSDu2Ew2dcehfiMqVV8qDaKWRLKHrTI39U3FTbxR2Y09x" 
+DISCORD_WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+
+# รายชื่อหุ้นที่ต้องการตรวจสอบ (ต้องระบุตรงนี้)
+STOCK_LIST = ["AAPL", "TSLA", "GOOGL", "MSFT", "NVDA"]
+
+if not DISCORD_WEBHOOK_URL:
+    raise ValueError("ไม่พบ DISCORD_WEBHOOK_URL กรุณาตั้งค่า Environment Variable")
+
+def get_scalar(val):
+    """ฟังก์ชันช่วยแปลงค่าให้เป็น float ธรรมดา ป้องกันปัญหาจาก pandas series"""
+    if isinstance(val, (pd.Series, pd.DataFrame)):
+        return float(val.iloc[0])
+    return float(val)
 
 def analyze_stock(symbol):
     try:
-        # ดึงข้อมูลย้อนหลัง 3 เดือน
+        # ดึงข้อมูลย้อนหลัง (ใช้ 3 เดือนเหมือนเดิมเพื่อให้มีข้อมูลพอทำ SMA)
         data = yf.download(symbol, period="3mo", interval="1d", progress=False)
+        
+        # ตรวจสอบว่ามีข้อมูลเพียงพอหรือไม่
         if len(data) < 50: return None
 
-        # ราคาปัจจุบัน
-        current_price = float(data['Close'].iloc[-1].iloc[0] if isinstance(data['Close'], pd.DataFrame) else data['Close'].iloc[-1])
+        # --- ส่วนที่ 1: ราคาและ SMA ---
+        # ราคาปัจจุบัน (แท่งล่าสุด)
+        current_close = data['Close'].iloc[-1]
+        current_price = get_scalar(current_close)
+
+        # SMA 50
+        sma_50_series = data['Close'].rolling(window=50).mean()
+        sma_50 = get_scalar(sma_50_series.iloc[-1])
+
+        # --- ส่วนที่ 2: คำนวณ Pivot Points (แนวรับ-ต้าน 3 ระดับ) ---
+        # ใช้ข้อมูลของ "เมื่อวาน" (แท่งก่อนหน้า -2) เพื่อคำนวณกรอบของ "วันนี้"
+        # เพราะถ้ารันระหว่างวัน แท่งล่าสุด (-1) อาจยังไม่จบวัน
+        prev_candle = data.iloc[-2] 
         
-        # คำนวณ SMA 50 (เส้นค่าเฉลี่ย)
-        sma_50 = data['Close'].rolling(window=50).mean().iloc[-1]
-        if isinstance(sma_50, pd.Series): sma_50 = float(sma_50.iloc[0])
-        else: sma_50 = float(sma_50)
+        prev_high = get_scalar(prev_candle['High'])
+        prev_low = get_scalar(prev_candle['Low'])
+        prev_close = get_scalar(prev_candle['Close'])
 
-        # แนวรับ-แนวต้าน (High/Low 20 วัน)
-        resistance = float(data['High'].tail(20).max().iloc[0] if isinstance(data['High'], pd.DataFrame) else data['High'].tail(20).max())
-        support = float(data['Low'].tail(20).min().iloc[0] if isinstance(data['Low'], pd.DataFrame) else data['Low'].tail(20).min())
+        # สูตร Standard Pivot Points
+        pivot = (prev_high + prev_low + prev_close) / 3
+        
+        # แนวต้าน (Resistance) 3 ระดับ
+        r1 = (2 * pivot) - prev_low
+        r2 = pivot + (prev_high - prev_low)
+        r3 = prev_high + 2 * (pivot - prev_low)
 
-        # ตัดสินแนวโน้ม
+        # แนวรับ (Support) 3 ระดับ
+        s1 = (2 * pivot) - prev_high
+        s2 = pivot - (prev_high - prev_low)
+        s3 = prev_low - 2 * (prev_high - pivot)
+
+        # --- ส่วนที่ 3: สรุปผล ---
         trend_icon = "🟢" if current_price > sma_50 else "🔴"
-        trend_text = "ขาขึ้น (Bullish)" if current_price > sma_50 else "ขาลง (Bearish)"
+        trend_text = "Bullish (เหนือ SMA50)" if current_price > sma_50 else "Bearish (ใต้ SMA50)"
 
         return {
             "symbol": symbol,
             "price": current_price,
             "trend": f"{trend_icon} {trend_text}",
-            "support": support,
-            "resistance": resistance
+            "supports": [s1, s2, s3],    # ส่งเป็น List
+            "resistances": [r1, r2, r3]  # ส่งเป็น List
         }
+
     except Exception as e:
-        print(f"Error analyzing {symbol}: {e}")
+        print(f"⚠️ Error analyzing {symbol}: {e}")
         return None
 
 def send_discord_message(results):
-    # สร้างข้อความแบบ Embed (กล่องสวยๆ)
     embeds = []
     
+    # หาวันที่ปัจจุบัน และจัดรูปแบบ (เช่น 30 Jan 2026)
+    report_date = datetime.now().strftime("%d %b %Y")
+
     for item in results:
-        color = 5763719 if "ขาขึ้น" in item['trend'] else 15548997 # เขียว หรือ แดง
+        # กำหนดสีขอบ (เขียว/แดง)
+        color = 5763719 if "Bullish" in item['trend'] else 15548997
         
+        # จัด Format ข้อความแนวรับแนวต้านให้อยู่ในบรรทัดเดียว หรือแยกบรรทัดให้อ่านง่าย
+        res_str = f"R3: {item['resistances'][2]:.2f}\nR2: {item['resistances'][1]:.2f}\nR1: {item['resistances'][0]:.2f}"
+        sup_str = f"S1: {item['supports'][0]:.2f}\nS2: {item['supports'][1]:.2f}\nS3: {item['supports'][2]:.2f}"
+
         embed = {
             "title": f"🇺🇸 {item['symbol']} : ${item['price']:.2f}",
+            "description": f"Trend: **{item['trend']}**",
             "color": color,
             "fields": [
-                {"name": "Trend", "value": item['trend'], "inline": True},
-                {"name": "Support", "value": f"${item['support']:.2f}", "inline": True},
-                {"name": "Resistance", "value": f"${item['resistance']:.2f}", "inline": True}
-            ]
+                {"name": "📉 Support Levels", "value": f"```\n{sup_str}\n```", "inline": True},
+                {"name": "📈 Resistance Levels", "value": f"```\n{res_str}\n```", "inline": True}
+            ],
+            "footer": {
+                "text": "Analysis by Python Bot"
+            }
         }
         embeds.append(embed)
 
-    # Payload สำหรับส่งไป Discord
+    # Payload หลัก
     payload = {
         "username": "Stock Assistant",
-        "content": "**📊 รายงานหุ้น US ประจำวัน** (Timeframe: Day)",
+        # เพิ่มวันที่ตรงนี้
+        "content": f"**📊 รายงานหุ้น US ประจำวัน**\n📅 ประจำวันที่: **{report_date}** (Timeframe: Day)",
         "embeds": embeds
     }
 
-    # ส่งข้อมูล
-    response = requests.post(
-        DISCORD_WEBHOOK_URL, 
-        data=json.dumps(payload), 
-        headers={"Content-Type": "application/json"}
-    )
-    
-    if response.status_code == 204:
-        print("✅ ส่งเข้า Discord สำเร็จ!")
-    else:
-        print(f"❌ ส่งไม่ผ่าน: {response.status_code} {response.text}")
+    try:
+        # ส่วนที่พยายามส่งข้อมูล
+        response = requests.post(
+            DISCORD_WEBHOOK_URL, 
+            data=json.dumps(payload), 
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # เช็คว่า Server ตอบกลับมาว่าสำเร็จหรือไม่ (204 = No Content คือสำเร็จสำหรับ Discord)
+        if response.status_code == 204:
+            print("✅ ส่งเข้า Discord สำเร็จ!")
+        else:
+            # กรณีส่งไปได้ แต่ Discord ปฏิเสธ (เช่น ลิงก์ผิด, format ผิด)
+            print(f"❌ ส่งไม่ผ่าน: {response.status_code} {response.text}")
 
-# --- รันโปรแกรม ---
-if __name__ == "__main__":
-    results = []
-    print("⏳ กำลังวิเคราะห์ข้อมูล...")
-    for stock in STOCK_LIST:
-        res = analyze_stock(stock)
-        if res:
-            results.append(res)
-    
-    if results:
-        send_discord_message(results)
-    else:
-        print("ไม่พบข้อมูลหุ้น")
+    except Exception as e:
+        # ส่วนนี้จะทำงานก็ต่อเมื่อ "โปรแกรมพัง" ก่อนที่จะได้คำตอบ 
+        # เช่น เน็ตหลุด, หา URL ไม่เจอ, หรือ Library requests มีปัญหา
+        print(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ: {e}")
